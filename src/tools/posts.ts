@@ -34,6 +34,7 @@ const addParams = {
   html: z.string().optional(),
   lexical: z.string().optional(),
   status: z.string().optional(),
+  tags: z.array(z.union([z.object({ id: z.string() }), z.object({ slug: z.string() }), z.object({ name: z.string() })])).optional(),
 };
 const editParams = {
   id: z.string(),
@@ -42,6 +43,7 @@ const editParams = {
   lexical: z.string().optional(),
   status: z.string().optional(),
   updated_at: z.string(),
+  tags: z.array(z.union([z.object({ id: z.string() }), z.object({ slug: z.string() }), z.object({ name: z.string() })])).optional(),
 };
 const deleteParams = {
   id: z.string(),
@@ -53,7 +55,7 @@ export function registerPostTools(server: McpServer) {
     "posts_browse",
     browseParams,
     async (args, _extra) => {
-      const posts = await ghostApiClient.posts.browse(args);
+      const posts = await ghostApiClient.posts.browse({ ...args, include: 'tags' } as any);
       return {
         content: [
           {
@@ -70,7 +72,7 @@ export function registerPostTools(server: McpServer) {
     "posts_read",
     readParams,
     async (args, _extra) => {
-      const post = await ghostApiClient.posts.read(args);
+      const post = await ghostApiClient.posts.read(args, { include: 'tags' } as any);
       return {
         content: [
           {
@@ -107,9 +109,16 @@ export function registerPostTools(server: McpServer) {
     editParams,
     async (args, _extra) => {
       await snapshotBefore(args.id, "before posts_edit");
+      // If tags not provided, read existing post to preserve its tags.
+      // Ghost silently strips all tags if the tags field is absent from the payload.
+      let tags = args.tags;
+      if (tags === undefined) {
+        const existing = await ghostApiClient.posts.read({ id: args.id }, { include: 'tags' } as any);
+        tags = (existing as any).tags ?? [];
+      }
       // If html is present, use source: "html" to ensure Ghost uses the html content for updates
       const options = args.html ? { source: "html" } : undefined;
-      const post = await ghostApiClient.posts.edit(args, options);
+      const post = await ghostApiClient.posts.edit({ ...args, tags } as any, options);
       return {
         content: [
           {
