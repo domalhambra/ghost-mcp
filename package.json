@@ -1,6 +1,6 @@
 {
     "name": "@fanyangmeng/ghost-mcp",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "MCP server for using the Ghost API",
     "main": "build/server.js",
     "bin": {
@@ -13,7 +13,7 @@
         "build": "tsc",
         "start": "node build/server.js",
         "prepare": "npm run build",
-        "test": "echo \"Error: no test specified\" && exit 1"
+        "test": "npm run build && node --test test/*.test.mjs"
     },
     "publishConfig": {
         "access": "public"
@@ -23,7 +23,7 @@
     "license": "ISC",
     "type": "commonjs",
     "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.10.1",
+        "@modelcontextprotocol/sdk": "~1.17.5",
         "@tryghost/admin-api": "^1.13.13",
         "axios": "^1.8.4",
         "zod": "^3.24.3"

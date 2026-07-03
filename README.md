@@ -31,6 +31,11 @@ A Model Context Protocol (MCP) server for interacting with Ghost CMS through LLM
 - Detailed, human-readable output for Ghost entities
 - Robust error handling using custom `GhostError` exceptions
 - Integrated logging support via MCP context for enhanced troubleshooting
+- **Safe editorial workflow**: propose → diff → approve → publish, with snapshot-backed rollback and scheduling
+- **Semantic content graph**: site-wide full-text search, internal link suggestions, overlap detection, and content gap analysis
+- **Business intelligence**: member growth, MRR trends, email performance, and a one-call weekly report
+- **Live activity feed**: an `activity://feed` MCP resource with real subscription support (pushes updates when new posts or members appear)
+- **Image uploads** from local paths or remote URLs
 
 ## Usage
 
@@ -131,6 +136,46 @@ This MCP server exposes a comprehensive set of tools for managing your Ghost CMS
 - **Browse Webhooks**: List webhooks.
 - **Add Webhook**: Create a new webhook.
 - **Delete Webhook**: Remove a webhook.
+
+### Editorial Workflow (safe editing)
+
+Editing a live post directly from an LLM is risky, so destructive operations are wrapped in a review-first workflow:
+
+- **posts_propose_edit**: Stage an edit without touching the live post. Returns a human-readable diff of the rendered content plus a `proposal_id`.
+- **posts_apply_edit**: Apply a staged proposal. Asks the user for approval via MCP elicitation when the client supports it; otherwise requires an explicit `confirm: true`. Detects when the post changed since the proposal was created. Snapshots the prior state first.
+- **posts_list_proposals / posts_discard_proposal**: Manage staged proposals.
+- **posts_schedule**: Schedule a draft to publish at a future time.
+- **posts_list_snapshots / posts_rollback**: Every destructive operation (including plain `posts_edit` and `posts_delete`) stores a local snapshot first. Rollback restores the snapshotted state — and recreates the post if it was deleted.
+
+Snapshots and proposals are stored locally in `~/.ghost-mcp/` (override with the `GHOST_MCP_DATA_DIR` environment variable).
+
+### Content Intelligence
+
+The server builds a local full-text index of your entire corpus (BM25 + TF-IDF cosine similarity, refreshed every 10 minutes):
+
+- **content_search**: Rank all posts against a natural-language query — full text, not just titles.
+- **suggest_internal_links**: Given a draft (or an existing post), suggests published posts to link to with anchor-text hints.
+- **find_overlapping_posts**: Detect near-duplicate posts that may cannibalize each other in search.
+- **content_gaps**: Cluster the corpus into topics and highlight thin, one-post topics and single-use tags.
+- **content_reindex**: Force an index rebuild.
+
+### Analytics & Reporting (read-only)
+
+- **analytics_summary**: Total/paid/free members, growth over a window, and MRR trend.
+- **email_performance**: Delivery and open rates for recent newsletter sends.
+- **top_posts**: Recent posts ranked by newsletter engagement.
+- **member_activity**: Recent signups/payments from the member activity feed, with signup attribution when available.
+- **site_weekly_report**: One call that summarizes publishing, member growth, MRR change, and newsletter sends for the last 7 days.
+
+Stats endpoints vary between Ghost versions; each tool degrades gracefully when an endpoint is unavailable.
+
+### Live Activity Feed
+
+The `activity://feed` resource summarizes recent posts and new members. Clients that support MCP resource subscriptions can subscribe to it: while subscribed, the server polls Ghost once a minute and pushes `notifications/resources/updated` when a new post or member appears.
+
+### Images
+
+- **images_upload**: Upload an image from a local file path or a remote URL; returns the hosted URL to use as `feature_image` or inside post HTML.
 
 > Each tool is accessible via the MCP protocol and can be invoked from compatible clients. For detailed parameter schemas and usage, see the source code in `src/tools/`.
 
