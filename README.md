@@ -23,6 +23,8 @@ A Model Context Protocol (MCP) server for interacting with Ghost CMS through LLM
 
 ![demo](./assets/ghost-mcp-demo.gif)
 
+> 📖 **New here?** See [`FEATURES.md`](./FEATURES.md) for a full feature & usage guide — a workflow-oriented walkthrough from publishing your first post to site-wide insights, with a complete tool reference.
+
 ## Features
 
 - Secure Ghost Admin API requests with `@tryghost/admin-api`
