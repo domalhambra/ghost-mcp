@@ -2,6 +2,21 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ghostApiClient } from "../ghostApi";
+import { takeSnapshot } from "../lib/snapshots";
+
+// Best-effort snapshot before a destructive operation so posts_rollback can
+// undo it. Never blocks the operation itself.
+async function snapshotBefore(postId: string, reason: string): Promise<void> {
+  try {
+    const post = await ghostApiClient.posts.read(
+      { id: postId },
+      { formats: ["html", "lexical"] }
+    );
+    takeSnapshot(post, reason);
+  } catch {
+    // Post may not exist or formats may be unavailable; proceed anyway.
+  }
+}
 
 // Parameter schemas as ZodRawShape (object literals)
 const browseParams = {
@@ -91,6 +106,7 @@ export function registerPostTools(server: McpServer) {
     "posts_edit",
     editParams,
     async (args, _extra) => {
+      await snapshotBefore(args.id, "before posts_edit");
       // If html is present, use source: "html" to ensure Ghost uses the html content for updates
       const options = args.html ? { source: "html" } : undefined;
       const post = await ghostApiClient.posts.edit(args, options);
@@ -110,6 +126,7 @@ export function registerPostTools(server: McpServer) {
     "posts_delete",
     deleteParams,
     async (args, _extra) => {
+      await snapshotBefore(args.id, "before posts_delete");
       await ghostApiClient.posts.delete(args);
       return {
         content: [

@@ -14,16 +14,20 @@ import {
 } from './resources'; // Import resource handlers
 
 // Create an MCP server instance
-const server = new McpServer({
-    name: "ghost-mcp-ts",
-    version: "1.0.0", // TODO: Get version from package.json
-    capabilities: {
-        resources: {}, // Capabilities will be enabled as handlers are registered
-        tools: {},
-        prompts: {},
-        logging: {} // Enable logging capability
+const server = new McpServer(
+    {
+        name: "ghost-mcp-ts",
+        version: "1.0.0", // TODO: Get version from package.json
+    },
+    {
+        capabilities: {
+            resources: {}, // Capabilities will be enabled as handlers are registered
+            tools: {},
+            prompts: {},
+            logging: {}, // Enable logging capability
+        },
     }
-});
+);
 
 // Register resource handlers
 server.resource("user", new ResourceTemplate("user://{user_id}", { list: undefined }), handleUserResource);
@@ -56,6 +60,22 @@ import { registerRoleTools } from "./tools/roles";
 registerRoleTools(server);
 import { registerWebhookTools } from "./tools/webhooks";
 registerWebhookTools(server);
+
+// Safe editorial workflow: propose -> diff -> approve -> publish, rollback.
+import { registerEditorialTools } from "./tools/editorial";
+registerEditorialTools(server);
+// Semantic content graph: search, internal links, overlap, gaps.
+import { registerContentTools } from "./tools/content";
+registerContentTools(server);
+// Business intelligence: analytics, email performance, weekly report.
+import { registerAnalyticsTools } from "./tools/analytics";
+registerAnalyticsTools(server);
+// Image uploads.
+import { registerImageTools } from "./tools/images";
+registerImageTools(server);
+// Live activity feed resource with subscription support.
+import { registerActivityFeed } from "./activity";
+registerActivityFeed(server);
 
 import { registerPrompts } from "./prompts";
 registerPrompts(server);
