@@ -193,6 +193,207 @@ const postPublish: Executor = {
     },
 };
 
+async function browsePostsWithTag(api: GhostClientLike, slug: string): Promise<any[]> {
+    const out: any[] = [];
+    let page = 1;
+    for (;;) {
+        const batch = await api.posts.browse({
+            filter: `tag:${slug}`,
+            include: "tags",
+            limit: 50,
+            page,
+        });
+        out.push(...batch);
+        if (!batch.meta?.pagination?.next) break;
+        page = batch.meta.pagination.next;
+    }
+    return out;
+}
+
+function cascadeFromPosts(posts: any[]): CascadeEntry[] {
+    return posts.map((p) => ({
+        post_id: p.id,
+        post_title: p.title,
+        tag_names: (p.tags ?? []).map((t: any) => t.name),
+    }));
+}
+
+// Restore each cascade post's tag list to exactly what it was at stage time.
+async function restoreCascadeTags(api: GhostClientLike, cascade: CascadeEntry[]): Promise<string[]> {
+    const failures: string[] = [];
+    for (const entry of cascade) {
+        try {
+            const current = await api.posts.read({ id: entry.post_id });
+            await api.posts.edit({
+                id: entry.post_id,
+                updated_at: current.updated_at,
+                tags: entry.tag_names.map((name) => ({ name })),
+            });
+        } catch (error: any) {
+            failures.push(`post ${entry.post_id} ("${entry.post_title}"): ${error?.message ?? error}`);
+        }
+    }
+    return failures;
+}
+
+const TAG_FIELDS = ["name", "slug", "description"];
+
+const tagAdd: Executor = {
+    kind: "tag.add",
+    reversible: true,
+    async stage(_api, params) {
+        if (!params.name) throw new Error("tag.add: name is required.");
+        return {
+            summary: `tag.add "${params.name}"`,
+            diff: `New tag "${params.name}"${params.slug ? ` (slug: ${params.slug})` : ""} will be created.`,
+        };
+    },
+    async preflight() {
+        return null;
+    },
+    async apply(api, op) {
+        const created = await api.tags.add(pickChanges(op.params, TAG_FIELDS));
+        op.staged.created_id = created.id;
+        return `Created tag "${created.name}" (${created.id}).`;
+    },
+    async revert(api, op) {
+        if (!op.staged.created_id) return "Tag was never created; nothing to revert.";
+        await api.tags.delete({ id: op.staged.created_id });
+        return `Deleted created tag ${op.staged.created_id}.`;
+    },
+};
+
+const tagEdit: Executor = {
+    kind: "tag.edit",
+    reversible: true,
+    async stage(api, params) {
+        const before = await api.tags.read({ id: params.id });
+        const changes = pickChanges(params, TAG_FIELDS);
+        if (Object.keys(changes).length === 0) throw new Error("tag.edit: no changes supplied.");
+        return {
+            summary: `tag.edit "${before.name}" (${Object.keys(changes).join(", ")})`,
+            diff: fieldDiff(before, changes),
+            baseline: before,
+            base_updated_at: before.updated_at,
+        };
+    },
+    preflight: lockedPreflight((api, op) => api.tags.read({ id: op.params.id }), "Tag"),
+    async apply(api, op) {
+        const updated = await api.tags.edit({
+            id: op.params.id,
+            updated_at: op.staged.base_updated_at,
+            ...pickChanges(op.params, TAG_FIELDS),
+        });
+        return `Updated tag "${updated.name}".`;
+    },
+    async revert(api, op) {
+        const before = op.staged.baseline;
+        const current = await api.tags.read({ id: op.params.id });
+        await api.tags.edit({
+            id: current.id,
+            updated_at: current.updated_at,
+            name: before.name,
+            slug: before.slug,
+            description: before.description,
+        });
+        return `Restored tag "${before.name}".`;
+    },
+};
+
+const tagDelete: Executor = {
+    kind: "tag.delete",
+    reversible: true,
+    async stage(api, params) {
+        const before = await api.tags.read({ id: params.id });
+        const affected = await browsePostsWithTag(api, before.slug);
+        const cascade = cascadeFromPosts(affected);
+        return {
+            summary: `tag.delete "${before.name}" (detaches from ${cascade.length} post(s))`,
+            diff:
+                `Tag "${before.name}" will be deleted and removed from ${cascade.length} post(s):\n` +
+                (cascade.map((c) => `  - "${c.post_title}"`).join("\n") || "  (none)") +
+                `\nRollback recreates the tag (new ID) and restores each post's tag list.`,
+            baseline: before,
+            base_updated_at: before.updated_at,
+            cascade,
+        };
+    },
+    preflight: lockedPreflight((api, op) => api.tags.read({ id: op.params.id }), "Tag"),
+    async apply(api, op) {
+        await api.tags.delete({ id: op.params.id });
+        return `Deleted tag "${op.staged.baseline.name}" (was on ${op.staged.cascade?.length ?? 0} post(s)).`;
+    },
+    async revert(api, op) {
+        const before = op.staged.baseline;
+        await api.tags.add({ name: before.name, slug: before.slug, description: before.description });
+        const failures = await restoreCascadeTags(api, op.staged.cascade ?? []);
+        return failures.length
+            ? `Recreated tag "${before.name}" (new ID) but failed to restore: ${failures.join("; ")}`
+            : `Recreated tag "${before.name}" (new ID) and restored ${op.staged.cascade?.length ?? 0} post association(s).`;
+    },
+};
+
+const tagMerge: Executor = {
+    kind: "tag.merge",
+    reversible: true,
+    async stage(api, params) {
+        const from = await api.tags.read(params.from_id ? { id: params.from_id } : { slug: params.from_slug });
+        const into = await api.tags.read(params.into_id ? { id: params.into_id } : { slug: params.into_slug });
+        const affected = await browsePostsWithTag(api, from.slug);
+        const cascade = cascadeFromPosts(affected);
+        return {
+            summary: `tag.merge "${from.name}" -> "${into.name}" (${cascade.length} post(s))`,
+            diff:
+                `Every post tagged "${from.name}" will be retagged to "${into.name}", then "${from.name}" is deleted:\n` +
+                (cascade.map((c) => `  - "${c.post_title}"`).join("\n") || "  (none)"),
+            baseline: { from, into },
+            base_updated_at: from.updated_at,
+            cascade,
+        };
+    },
+    // Custom preflight: tag.merge's baseline is a composite { from, into }, so
+    // it must NOT be clobbered the way lockedPreflight replaces a single entity.
+    async preflight(api, op) {
+        const from = op.staged.baseline?.from;
+        const current = await api.tags.read({ id: from.id });
+        if (op.staged.base_updated_at && current.updated_at !== op.staged.base_updated_at) {
+            return (
+                `Tag "${current.name}" changed since it was staged ` +
+                `(updated_at ${op.staged.base_updated_at} -> ${current.updated_at}). Re-stage the operation.`
+            );
+        }
+        op.staged.base_updated_at = current.updated_at;
+        return null;
+    },
+    async apply(api, op) {
+        const { from, into } = op.staged.baseline;
+        for (const entry of op.staged.cascade ?? []) {
+            const current = await api.posts.read({ id: entry.post_id });
+            const names = new Set(entry.tag_names.filter((n: string) => n !== from.name));
+            names.add(into.name);
+            await api.posts.edit({
+                id: entry.post_id,
+                updated_at: current.updated_at,
+                tags: [...names].map((name) => ({ name })),
+            });
+        }
+        await api.tags.delete({ id: from.id });
+        return `Merged "${from.name}" into "${into.name}" across ${op.staged.cascade?.length ?? 0} post(s).`;
+    },
+    async revert(api, op) {
+        const { from } = op.staged.baseline;
+        try {
+            await api.tags.read({ slug: from.slug });
+        } catch {
+            await api.tags.add({ name: from.name, slug: from.slug, description: from.description });
+        }
+        const failures = await restoreCascadeTags(api, op.staged.cascade ?? []);
+        return failures.length
+            ? `Recreated "${from.name}" but failed to restore: ${failures.join("; ")}`
+            : `Unmerged: recreated "${from.name}" and restored original tag lists.`;
+    },
+};
+
 export function executorFor(kind: OperationKind): Executor {
     const executor = REGISTRY[kind];
     if (!executor) throw new Error(`Unknown operation kind "${kind}".`);
@@ -205,6 +406,10 @@ const REGISTRY: Partial<Record<OperationKind, Executor>> = {
     "post.schedule": makePostEditExecutor("post.schedule", ["status", "published_at"]),
     "post.delete": postDelete,
     "post.publish": postPublish,
+    "tag.add": tagAdd,
+    "tag.edit": tagEdit,
+    "tag.delete": tagDelete,
+    "tag.merge": tagMerge,
 };
 
 export const OPERATION_KINDS = Object.keys(REGISTRY) as OperationKind[];

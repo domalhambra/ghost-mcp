@@ -115,3 +115,47 @@ test("post.publish is irreversible and passes the newsletter option through", as
     await ex.apply(api, op);
     assert.equal(api.posts.rows[0].status, "published");
 });
+
+test("tag.delete captures affected posts and revert restores tag + associations", async () => {
+    const t = tag("t1", "Tutorials");
+    const api = makeFakeGhost({
+        tags: [t],
+        posts: [
+            post("p1", "Guide One", { tags: [{ id: "t1", name: "Tutorials", slug: "tutorials" }] }),
+            post("p2", "Unrelated"),
+        ],
+    });
+    const ex = executorFor("tag.delete");
+    const staged = await ex.stage(api, { id: "t1" });
+    assert.equal(staged.cascade.length, 1);
+    assert.equal(staged.cascade[0].post_id, "p1");
+
+    const op = { id: "op_td", kind: "tag.delete", params: { id: "t1" }, reversible: true, staged };
+    assert.equal(await ex.preflight(api, op), null);
+    await ex.apply(api, op);
+    assert.equal(api.tags.rows.length, 0);
+
+    api.posts.rows[0].tags = []; // Ghost cascades tag removal off posts
+    await ex.revert(api, op);
+    assert.equal(api.tags.rows.length, 1);
+    assert.ok(api.posts.rows[0].tags.some((x) => x.name === "Tutorials"));
+});
+
+test("tag.merge retags affected posts then deletes the source tag", async () => {
+    const api = makeFakeGhost({
+        tags: [tag("t1", "Guides"), tag("t2", "Tutorials")],
+        posts: [post("p1", "Post A", { tags: [{ id: "t1", name: "Guides", slug: "guides" }] })],
+    });
+    const ex = executorFor("tag.merge");
+    const staged = await ex.stage(api, { from_id: "t1", into_id: "t2" });
+    const op = { id: "op_tm", kind: "tag.merge", params: { from_id: "t1", into_id: "t2" },
+        reversible: true, staged };
+    assert.equal(await ex.preflight(api, op), null);
+    await ex.apply(api, op);
+    assert.equal(api.tags.rows.length, 1);
+    assert.deepEqual(api.posts.rows[0].tags.map((x) => x.name), ["Tutorials"]);
+
+    await ex.revert(api, op);
+    assert.ok(api.tags.rows.some((x) => x.name === "Guides"));
+    assert.deepEqual(api.posts.rows[0].tags.map((x) => x.name).sort(), ["Guides"]);
+});
