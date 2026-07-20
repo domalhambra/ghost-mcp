@@ -187,3 +187,98 @@ test("member.edit reverts from baseline", async () => {
     await ex.revert(api, op);
     assert.equal(api.members.rows[0].name, "Ada");
 });
+
+const { stageOperation, applyPlan, rollbackPlan, renderPlanDiff } =
+    await import("../build/lib/planEngine.js");
+
+function twoPostPlan(api) {
+    const plan = createPlan("two edits");
+    return (async () => {
+        for (const [id, title] of [["p1", "One B"], ["p2", "Two B"]]) {
+            await stageOperation(api, plan.id, "post.edit", { id, changes: { title } });
+        }
+        return getPlan(plan.id);
+    })();
+}
+
+test("applyPlan happy path applies in order and marks the plan applied", async () => {
+    const api = makeFakeGhost({ posts: [post("p1", "One A"), post("p2", "Two A")] });
+    const plan = await twoPostPlan(api);
+    const report = await applyPlan(api, plan.id, []);
+    assert.equal(report.plan.status, "applied");
+    assert.deepEqual(api.posts.rows.map((p) => p.title), ["One B", "Two B"]);
+    assert.ok(report.plan.ops.every((o) => o.result?.status === "applied"));
+});
+
+test("applyPlan aborts before any write when preflight finds a conflict", async () => {
+    const api = makeFakeGhost({ posts: [post("p1", "One A"), post("p2", "Two A")] });
+    const plan = await twoPostPlan(api);
+    await api.posts.edit({ id: "p2", updated_at: api.posts.rows[1].updated_at, title: "Two changed" });
+    const report = await applyPlan(api, plan.id, []);
+    assert.equal(report.plan.status, "open");
+    assert.match(report.text, /changed since/);
+    assert.equal(api.posts.rows[0].title, "One A"); // op 1 was NOT applied
+});
+
+test("applyPlan compensates applied ops in reverse order on mid-plan failure", async () => {
+    const api = makeFakeGhost({ posts: [post("p1", "One A"), post("p2", "Two A")] });
+    const plan = await twoPostPlan(api);
+    const realEdit = api.posts.edit.bind(api.posts);
+    let editCalls = 0;
+    api.posts.edit = async (data, options) => {
+        editCalls += 1;
+        if (editCalls === 2) throw new Error("boom: simulated API failure");
+        return realEdit(data, options);
+    };
+    const report = await applyPlan(api, plan.id, []);
+    assert.equal(report.plan.status, "failed");
+    assert.equal(report.plan.ops[0].result.status, "reverted");
+    assert.equal(report.plan.ops[1].result.status, "failed");
+    assert.equal(api.posts.rows[0].title, "One A"); // compensated
+    assert.equal(api.posts.rows[1].title, "Two A"); // never applied
+    assert.match(report.text, /compensat/i);
+});
+
+test("applyPlan refuses irreversible ops without per-op acknowledgment", async () => {
+    const api = makeFakeGhost({ posts: [post("p1", "Launch", { status: "draft" })] });
+    const plan = createPlan("publish");
+    await stageOperation(api, plan.id, "post.publish", { id: "p1" });
+    const opId = getPlan(plan.id).ops[0].id;
+
+    const refused = await applyPlan(api, plan.id, []);
+    assert.equal(refused.plan.status, "open");
+    assert.match(refused.text, /acknowledge/i);
+    assert.equal(api.posts.rows[0].status, "draft");
+
+    const accepted = await applyPlan(api, plan.id, [opId]);
+    assert.equal(accepted.plan.status, "applied");
+    assert.equal(api.posts.rows[0].status, "published");
+});
+
+test("rollbackPlan reverts reversible ops in reverse order and skips irreversible ones", async () => {
+    const api = makeFakeGhost({ posts: [post("p1", "One A"), post("p2", "Launch", { status: "draft" })] });
+    const plan = createPlan("mixed");
+    await stageOperation(api, plan.id, "post.edit", { id: "p1", changes: { title: "One B" } });
+    await stageOperation(api, plan.id, "post.publish", { id: "p2" });
+    const pubId = getPlan(plan.id).ops[1].id;
+    await applyPlan(api, plan.id, [pubId]);
+
+    const report = await rollbackPlan(api, plan.id);
+    assert.equal(report.plan.status, "rolled_back");
+    assert.equal(api.posts.rows[0].title, "One A");
+    assert.equal(api.posts.rows[1].status, "published"); // NOT silently reverted
+    assert.equal(report.plan.ops[1].result.status, "skipped");
+    assert.match(report.text, /irreversible/i);
+});
+
+test("renderPlanDiff flags irreversible ops and counts classes", async () => {
+    const api = makeFakeGhost({ posts: [post("p1", "One A"), post("p2", "Launch", { status: "draft" })] });
+    const plan = createPlan("diffing");
+    await stageOperation(api, plan.id, "post.edit", { id: "p1", changes: { title: "One B" } });
+    await stageOperation(api, plan.id, "post.publish", { id: "p2" });
+    const out = renderPlanDiff(getPlan(plan.id));
+    assert.match(out, /\[1\] post\.edit/);
+    assert.match(out, /\[2\] post\.publish/);
+    assert.match(out, /IRREVERSIBLE/);
+    assert.match(out, /1 reversible, 1 irreversible/);
+});
