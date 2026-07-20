@@ -282,3 +282,8 @@ test("renderPlanDiff flags irreversible ops and counts classes", async () => {
     assert.match(out, /IRREVERSIBLE/);
     assert.match(out, /1 reversible, 1 irreversible/);
 });
+
+test("plans tool module exports a register function", async () => {
+    const mod = await import("../build/tools/plans.js");
+    assert.equal(typeof mod.registerPlanTools, "function");
+});
