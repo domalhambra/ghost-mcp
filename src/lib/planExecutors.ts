@@ -394,6 +394,104 @@ const tagMerge: Executor = {
     },
 };
 
+// Generic reversible field-edit executor for entities where a baseline
+// restore is faithful (members, newsletters).
+function makeFieldEditExecutor(
+    kind: OperationKind,
+    resource: keyof GhostClientLike,
+    allowed: string[],
+    label: string
+): Executor {
+    return {
+        kind,
+        reversible: true,
+        async stage(api, params) {
+            const before = await (api[resource] as any).read({ id: params.id });
+            const changes = pickChanges(params, allowed);
+            if (Object.keys(changes).length === 0) throw new Error(`${kind}: no changes supplied.`);
+            return {
+                summary: `${kind} "${before.name ?? before.email ?? params.id}" (${Object.keys(changes).join(", ")})`,
+                diff: fieldDiff(before, changes),
+                baseline: before,
+                base_updated_at: before.updated_at,
+            };
+        },
+        preflight: lockedPreflight((api, op) => (api[resource] as any).read({ id: op.params.id }), label),
+        async apply(api, op) {
+            const updated = await (api[resource] as any).edit({
+                id: op.params.id,
+                ...pickChanges(op.params, allowed),
+            });
+            return `Updated ${label.toLowerCase()} "${updated.name ?? updated.email ?? op.params.id}".`;
+        },
+        async revert(api, op) {
+            const before = op.staged.baseline;
+            const restore: Record<string, any> = { id: op.params.id };
+            for (const field of allowed) restore[field] = before[field] ?? null;
+            await (api[resource] as any).edit(restore);
+            return `Restored ${label.toLowerCase()} "${before.name ?? before.email ?? op.params.id}".`;
+        },
+    };
+}
+
+// Irreversible field-edit executor: applies but offers no revert. The warning
+// string is embedded in every staged diff so plans_diff cannot hide it.
+function makeIrreversibleEditExecutor(
+    kind: OperationKind,
+    resource: keyof GhostClientLike,
+    allowed: string[],
+    label: string,
+    warning: string
+): Executor {
+    return {
+        kind,
+        reversible: false,
+        async stage(api, params) {
+            const before = await (api[resource] as any).read({ id: params.id });
+            const changes = pickChanges(params, allowed);
+            if (Object.keys(changes).length === 0) throw new Error(`${kind}: no changes supplied.`);
+            return {
+                summary: `${kind} "${before.name ?? params.id}" (${Object.keys(changes).join(", ")})`,
+                diff: `${fieldDiff(before, changes)}\nIRREVERSIBLE: ${warning}`,
+                baseline: before,
+                base_updated_at: before.updated_at,
+            };
+        },
+        preflight: lockedPreflight((api, op) => (api[resource] as any).read({ id: op.params.id }), label),
+        async apply(api, op) {
+            const updated = await (api[resource] as any).edit({
+                id: op.params.id,
+                ...pickChanges(op.params, allowed),
+            });
+            return `Updated ${label.toLowerCase()} "${updated.name ?? op.params.id}" (irreversible).`;
+        },
+    };
+}
+
+const memberDelete: Executor = {
+    kind: "member.delete",
+    reversible: false,
+    async stage(api, params) {
+        const before = await api.members.read({ id: params.id });
+        return {
+            summary: `member.delete "${before.email}"`,
+            diff:
+                `Member "${before.name ?? before.email}" <${before.email}> will be DELETED.\n` +
+                `IRREVERSIBLE: deleting a member destroys their Stripe linkage, subscription history, ` +
+                `and email analytics. Recreating from a copy would be a hollow shell, so no rollback is offered.`,
+            baseline: before,
+        };
+    },
+    async preflight(api, op) {
+        await api.members.read({ id: op.params.id });
+        return null;
+    },
+    async apply(api, op) {
+        await api.members.delete({ id: op.params.id });
+        return `Deleted member "${op.staged.baseline.email}" (irreversible).`;
+    },
+};
+
 export function executorFor(kind: OperationKind): Executor {
     const executor = REGISTRY[kind];
     if (!executor) throw new Error(`Unknown operation kind "${kind}".`);
@@ -410,6 +508,27 @@ const REGISTRY: Partial<Record<OperationKind, Executor>> = {
     "tag.edit": tagEdit,
     "tag.delete": tagDelete,
     "tag.merge": tagMerge,
+    "newsletter.edit": makeFieldEditExecutor(
+        "newsletter.edit", "newsletters",
+        ["name", "description", "sender_name", "sender_reply_to", "subject_prefix", "show_badge"],
+        "Newsletter"
+    ),
+    "member.edit": makeFieldEditExecutor(
+        "member.edit", "members", ["name", "note", "labels", "email"], "Member"
+    ),
+    "member.delete": memberDelete,
+    "tier.edit": makeIrreversibleEditExecutor(
+        "tier.edit", "tiers",
+        ["name", "description", "monthly_price", "yearly_price", "currency", "benefits", "visibility", "active"],
+        "Tier",
+        "price changes create new Stripe prices; reverting would create a third price, not restore the original state."
+    ),
+    "offer.edit": makeIrreversibleEditExecutor(
+        "offer.edit", "offers",
+        ["name", "display_title", "display_description", "code"],
+        "Offer",
+        "offers cannot be deleted via the Admin API and redemption state cannot be rewound."
+    ),
 };
 
 export const OPERATION_KINDS = Object.keys(REGISTRY) as OperationKind[];

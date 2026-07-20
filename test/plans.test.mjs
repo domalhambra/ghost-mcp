@@ -159,3 +159,31 @@ test("tag.merge retags affected posts then deletes the source tag", async () => 
     assert.ok(api.tags.rows.some((x) => x.name === "Guides"));
     assert.deepEqual(api.posts.rows[0].tags.map((x) => x.name).sort(), ["Guides"]);
 });
+
+test("member.edit is reversible; member.delete, tier.edit, offer.edit are irreversible", () => {
+    assert.equal(executorFor("member.edit").reversible, true);
+    assert.equal(executorFor("newsletter.edit").reversible, true);
+    for (const kind of ["member.delete", "tier.edit", "offer.edit"]) {
+        assert.equal(executorFor(kind).reversible, false, kind);
+    }
+});
+
+test("member.delete stage output warns about Stripe history", async () => {
+    const api = makeFakeGhost({ members: [{ id: "m1", email: "a@b.com", name: "Ada", updated_at: "t0" }] });
+    const staged = await executorFor("member.delete").stage(api, { id: "m1" });
+    assert.match(staged.diff, /IRREVERSIBLE/);
+    assert.match(staged.diff, /Stripe/);
+});
+
+test("member.edit reverts from baseline", async () => {
+    const api = makeFakeGhost({ members: [{ id: "m1", email: "a@b.com", name: "Ada", note: null, labels: [], updated_at: "t0" }] });
+    const ex = executorFor("member.edit");
+    const staged = await ex.stage(api, { id: "m1", changes: { name: "Grace" } });
+    const op = { id: "op_me", kind: "member.edit", params: { id: "m1", changes: { name: "Grace" } },
+        reversible: true, staged };
+    assert.equal(await ex.preflight(api, op), null);
+    await ex.apply(api, op);
+    assert.equal(api.members.rows[0].name, "Grace");
+    await ex.revert(api, op);
+    assert.equal(api.members.rows[0].name, "Ada");
+});
