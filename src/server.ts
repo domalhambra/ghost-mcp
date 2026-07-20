@@ -60,6 +60,8 @@ import { registerRoleTools } from "./tools/roles";
 registerRoleTools(server);
 import { registerWebhookTools } from "./tools/webhooks";
 registerWebhookTools(server);
+import { registerPageTools } from "./tools/pages";
+registerPageTools(server);
 
 // Safe editorial workflow: propose -> diff -> approve -> publish, rollback.
 import { registerEditorialTools } from "./tools/editorial";
