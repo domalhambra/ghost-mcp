@@ -24,10 +24,17 @@ const browseParams = {
   limit: z.number().optional(),
   page: z.number().optional(),
   order: z.string().optional(),
+  // Optional overrides so callers can request richer output (e.g. plaintext
+  // body + authors) in one round trip instead of browsing then reading each
+  // post individually. Defaults preserve prior behavior exactly.
+  include: z.string().optional(),
+  formats: z.array(z.string()).optional(),
 };
 const readParams = {
   id: z.string().optional(),
   slug: z.string().optional(),
+  include: z.string().optional(),
+  formats: z.array(z.string()).optional(),
 };
 const addParams = {
   title: z.string(),
@@ -55,7 +62,12 @@ export function registerPostTools(server: McpServer) {
     "posts_browse",
     browseParams,
     async (args, _extra) => {
-      const posts = await ghostApiClient.posts.browse({ ...args, include: 'tags' } as any);
+      const { include, formats, ...rest } = args;
+      const posts = await ghostApiClient.posts.browse({
+        ...rest,
+        include: include ?? 'tags',
+        ...(formats ? { formats } : {}),
+      } as any);
       return {
         content: [
           {
@@ -72,7 +84,11 @@ export function registerPostTools(server: McpServer) {
     "posts_read",
     readParams,
     async (args, _extra) => {
-      const post = await ghostApiClient.posts.read(args, { include: 'tags' } as any);
+      const { include, formats, ...data } = args;
+      const post = await ghostApiClient.posts.read(data, {
+        include: include ?? 'tags',
+        ...(formats ? { formats } : {}),
+      } as any);
       return {
         content: [
           {
