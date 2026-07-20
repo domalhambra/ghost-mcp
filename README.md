@@ -59,6 +59,24 @@ To use this with MCP clients, for instance, Claude Desktop, add the following to
 }
 ```
 
+The `GHOST_ADMIN_API_KEY` comes from **Ghost Admin → Settings → Integrations → Add custom integration**. It is read only from the environment at runtime and is never stored in this repository. `GHOST_API_VERSION` is optional and defaults to a current v5 API.
+
+## How to use it
+
+Once the server is connected, you drive it in plain language from your MCP client — you don't call tools by name yourself; the assistant selects them. The overall process follows a few recommended paths depending on what you're doing:
+
+1. **Reading and reporting** — Ask questions and the assistant uses the read-only tools (`*_browse`, `*_read`, the analytics tools, `content_search`) to answer. Nothing is modified. Good starting points: *"How many paid members do I have?"*, *"What have I written about onboarding?"*, *"Give me this week's site report."*
+
+2. **Creating content** — For new posts, the assistant uses `posts_add` (drafts by default), `images_upload` for media, and `posts_schedule` or a status change to publish. New tags, members, tiers, offers, and newsletters have their own `*_add` tools.
+
+3. **Changing existing content safely (single item)** — Rather than editing a live post blind, the recommended path is **propose → review → approve → (optionally) rollback**: `posts_propose_edit` stages the change and returns a diff, you review it, `posts_apply_edit` applies it after your approval, and `posts_rollback` undoes it from the automatic snapshot if needed. Every destructive operation snapshots first.
+
+4. **Changing many things at once (batch)** — When a request spans multiple posts/tags/entities, use a **site change plan**: `plans_create` → one `plans_add_op` per change → `plans_diff` to review the whole batch → `plans_apply` to run it with one approval (and automatic best-effort rollback if any step fails) → `plans_rollback` to undo it later. See [Site Change Plans](#site-change-plans-transactional-batch-editing) below.
+
+5. **Approvals** — Any operation that writes to your site asks for confirmation. If your MCP client supports *elicitation*, you approve or decline in the client itself; if it doesn't, the tool refuses until you re-run it with `confirm: true` (and, for irreversible plan operations, an explicit acknowledgment). This means an assistant can never quietly change your live site.
+
+For a workflow-oriented walkthrough with concrete example prompts, see [`FEATURES.md`](./FEATURES.md).
+
 ## Available Resources
 
 The following Ghost CMS resources are available through this MCP server:
@@ -151,6 +169,26 @@ Editing a live post directly from an LLM is risky, so destructive operations are
 - **posts_list_snapshots / posts_rollback**: Every destructive operation (including plain `posts_edit` and `posts_delete`) stores a local snapshot first. Rollback restores the snapshotted state — and recreates the post if it was deleted.
 
 Snapshots and proposals are stored locally in `~/.ghost-mcp/` (override with the `GHOST_MCP_DATA_DIR` environment variable).
+
+### Site Change Plans (transactional batch editing)
+
+The editorial workflow above protects a *single* post. **Site change plans** extend the same propose → review → approve → rollback model to a whole batch of changes spanning multiple entity types (posts, tags, members, tiers, offers, newsletters), reviewed as one diff, approved once, and undone as a unit. This is the tool to reach for when a request touches many things at once — e.g. *"merge two tags, retag the affected posts, and fix the newsletter sender name"* — where running a dozen individual API calls would leave the site half-migrated if one fails.
+
+The flow is always the same: **create** an empty plan → **add operations** to it (nothing touches the live site yet) → review the **diff** → **apply** (with confirmation) → optionally **rollback**.
+
+- **plans_create**: Open a new, empty plan. Takes a `name` (e.g. `"merge tutorial tags"`) and an optional `intent` describing why. Returns a `plan_id` used by every other plan tool. The plan starts in the `open` state; nothing is written to Ghost until you apply it.
+- **plans_add_op**: Stage one operation into an open plan and return an immediate per-operation diff — the live site is untouched. Takes the `plan_id`, an operation `kind`, and a `params` object whose shape depends on the kind:
+  - **Reversible operations** (full rollback supported): `post.edit`, `post.retag`, `post.schedule` — `{id, changes:{title|html|lexical|status|published_at|custom_excerpt|featured|tags}}`; `post.delete` — `{id}`; `tag.add` — `{name, slug?, description?}`; `tag.edit` — `{id, changes}`; `tag.delete` — `{id}` (captures every affected post so associations can be restored); `tag.merge` — `{from_id|from_slug, into_id|into_slug}` (retags all affected posts, then deletes the source tag); `newsletter.edit` and `member.edit` — `{id, changes}`.
+  - **Irreversible operations** (flagged, require acknowledgment, never auto-undone): `post.publish` — `{id, published_at?, newsletter_slug?, email_segment?}` (an email send cannot be recalled); `member.delete` — `{id}` (destroys Stripe linkage and history); `tier.edit` and `offer.edit` — `{id, changes}` (price changes mint new Stripe prices).
+- **plans_diff**: Show the full rollup diff of a plan — every staged operation, its rendered change, and a clear flag on each irreversible operation, plus a summary count of reversible vs. irreversible ops. Review this before applying.
+- **plans_apply**: Apply an open plan. First **preflights every operation** against the live site using Ghost's `updated_at` optimistic lock; if anything changed since it was staged, the whole plan aborts **before any write**. Then it applies operations sequentially. If a step fails mid-plan, already-applied reversible operations are **automatically compensated in reverse order** (best-effort — Ghost has no true transactions, so a compensating write can itself fail and is reported rather than hidden). Asks for approval via MCP elicitation when the client supports it; otherwise requires `confirm: true`. Irreversible operations must have their operation IDs passed in `acknowledge_irreversible: [...]` or the apply refuses to run.
+- **plans_rollback**: Undo a fully applied plan. Reverts its reversible operations in reverse order from the baselines captured at apply time. Irreversible operations are **skipped and reported**, never silently undone. Note that recreated entities (e.g. a rolled-back post or tag delete) come back with a new ID, matching `posts_rollback` behavior.
+- **plans_list**: List all plans, newest first, with each plan's status (`open` / `applying` / `applied` / `failed` / `rolled_back`), operation count, and how many operations are irreversible.
+- **plans_discard**: Delete a plan that has not been applied. Applied plans are kept so `plans_rollback` stays possible; a plan mid-apply cannot be discarded.
+
+Plans are stored locally in `~/.ghost-mcp/` alongside snapshots and proposals (override with `GHOST_MCP_DATA_DIR`).
+
+**Honest limits** (also enforced in the tool output): there are no true transactions, so rollback is best-effort compensation, not atomicity; recreated entities get new IDs; and irreversible operations always stay applied.
 
 ### Content Intelligence
 
