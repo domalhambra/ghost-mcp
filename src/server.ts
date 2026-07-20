@@ -76,6 +76,9 @@ registerImageTools(server);
 // Live activity feed resource with subscription support.
 import { registerActivityFeed } from "./activity";
 registerActivityFeed(server);
+// Site-wide change plans: plan -> diff -> approve -> apply -> rollback.
+import { registerPlanTools } from "./tools/plans";
+registerPlanTools(server);
 
 import { registerPrompts } from "./prompts";
 registerPrompts(server);

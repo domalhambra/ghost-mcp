@@ -19,6 +19,7 @@ advanced (site-wide insights and automation). For install/config, see
 2. [Setup in 30 seconds](#setup-in-30-seconds)
 3. [Publishing & content creation](#1-publishing--content-creation)
 4. [Safe editing: propose → diff → approve → rollback](#2-safe-editing-propose--diff--approve--rollback)
+   - [Site change plans](#2b-site-change-plans-batch-many-edits-into-one-reviewable-unit)
 5. [Media & images](#3-media--images)
 6. [Content strategy & SEO](#4-content-strategy--seo)
 7. [Audience & membership](#5-audience--membership)
@@ -130,6 +131,58 @@ elicitation, the tool refuses to proceed until you re-run it with `confirm: true
 1. `posts_propose_edit` → assistant shows you a red/green diff, live post untouched.
 2. You read it, then approve → `posts_apply_edit`.
 3. Changed your mind after the fact → `posts_rollback` restores the snapshot.
+
+---
+
+## 2b. Site change plans: batch many edits into one reviewable unit
+
+The propose → approve → rollback loop above protects a *single* post. **Site change
+plans** extend the same safety model to a whole batch of changes spanning different
+entity types — posts, tags, members, tiers, offers, and newsletters — reviewed as one
+diff, approved once, and undoable as a unit.
+
+The motivating case: *"Merge my `tutorials` and `guides` tags, retag the affected posts,
+and fix the newsletter sender name."* That's a dozen-plus individually irreversible API
+calls. If call 8 fails, a plain sequence leaves your site half-migrated with no undo. A
+plan turns it into: stage everything, review one rollup diff, approve once, and if any
+step fails mid-way the already-applied steps are automatically rolled back.
+
+| Tool | What it does |
+|---|---|
+| `plans_create` | Open a named batch. Nothing touches the site until apply. |
+| `plans_add_op` | Stage one operation (post edit/delete/publish/schedule/retag, tag add/edit/delete/merge, member/newsletter edits, member delete, tier/offer edits) into an open plan, with an immediate per-op diff. |
+| `plans_diff` | One rollup diff of the whole plan, with **irreversible operations flagged**. |
+| `plans_apply` | Preflight every operation against the live site (conflicts abort **before any write**), then apply sequentially. Mid-plan failure triggers **automatic best-effort compensation** of applied reversible ops in reverse order. |
+| `plans_rollback` | Revert a fully applied plan's reversible operations from apply-time baselines. Irreversible ops are skipped and reported. |
+| `plans_list` / `plans_discard` | Inspect and clean up plans. |
+
+**Reversible vs irreversible.** Content operations (post edits/deletes/retags/scheduling,
+tag add/edit/delete/merge, member and newsletter edits) are fully reversible — the plan
+captures a baseline of every entity it touches, including the affected-post list for a tag
+delete or merge, so rollback restores associations, not just the entity. Some operations
+cannot be truly undone and are treated as a distinct class: **publishing with an email send**
+(the email can't be recalled), **member deletes** (Stripe linkage and history are destroyed),
+and **tier/offer edits** (price changes mint new Stripe prices). These are allowed in a plan
+but flagged in the diff and require you to pass their operation IDs in `acknowledge_irreversible`
+before `plans_apply` will proceed; they are never silently rolled back.
+
+**Honest limits — worth stating plainly:**
+- **No true transactions.** Ghost's Admin API has none, so "apply with automatic rollback"
+  is *best-effort compensation*, not atomicity. A compensating write can itself fail; when it
+  does, the tool says so and points you at the entity to inspect, rather than hiding it.
+- **Recreated entities get new IDs.** Rolling back a deleted post or tag recreates it — with a
+  new ID, exactly as `posts_rollback` already does.
+- **Irreversible operations stay applied.** They are skipped during rollback and reported, never
+  quietly undone.
+- **Concurrency.** Preflight uses Ghost's `updated_at` optimistic lock to catch anything a human
+  changed in Ghost Admin between staging and applying, and aborts the whole plan before writing.
+
+**Typical flow — "Merge two tags and clean up":**
+1. `plans_create` → `plans_add_op` (tag.merge) → `plans_add_op` (newsletter.edit) → …
+2. `plans_diff` → review the whole batch, note any `IRREVERSIBLE` flags.
+3. `plans_apply` (with `acknowledge_irreversible` for flagged ops) → applied atomically-ish,
+   compensated automatically if any step fails.
+4. Changed your mind → `plans_rollback` restores the reversible operations.
 
 ---
 
@@ -298,6 +351,8 @@ starter **prompt**:
 
 **Editorial workflow:** `posts_propose_edit` · `posts_list_proposals` · `posts_discard_proposal` · `posts_apply_edit` · `posts_schedule` · `posts_list_snapshots` · `posts_rollback`
 
+**Site change plans:** `plans_create` · `plans_add_op` · `plans_diff` · `plans_apply` · `plans_rollback` · `plans_list` · `plans_discard`
+
 **Content intelligence:** `content_search` · `suggest_internal_links` · `find_overlapping_posts` · `content_gaps` · `content_reindex`
 
 **Analytics (read-only):** `analytics_summary` · `email_performance` · `top_posts` · `member_activity` · `site_weekly_report`
@@ -326,7 +381,7 @@ starter **prompt**:
 
 ## Where data is stored
 
-Proposals and snapshots are kept **locally**, not in Ghost, under `~/.ghost-mcp/`.
+Proposals, snapshots, and change plans are kept **locally**, not in Ghost, under `~/.ghost-mcp/`.
 Override the location with the `GHOST_MCP_DATA_DIR` environment variable. Nothing
 sensitive is committed to the repository — your Admin API key is read only from the
 environment at runtime.

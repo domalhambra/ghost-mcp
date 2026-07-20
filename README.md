@@ -34,6 +34,7 @@ A Model Context Protocol (MCP) server for interacting with Ghost CMS through LLM
 - Robust error handling using custom `GhostError` exceptions
 - Integrated logging support via MCP context for enhanced troubleshooting
 - **Safe editorial workflow**: propose → diff → approve → publish, with snapshot-backed rollback and scheduling
+- **Site change plans**: batch operations across posts, tags, members, tiers, offers, and newsletters into one plan with a single rollup diff, one approval, sequential apply with automatic best-effort compensation on failure, and one-command rollback. Irreversible operations (email sends, Stripe-touching edits, member deletes) are flagged and require explicit per-operation acknowledgment.
 - **Semantic content graph**: site-wide full-text search, internal link suggestions, overlap detection, and content gap analysis
 - **Business intelligence**: member growth, MRR trends, email performance, and a one-call weekly report
 - **Live activity feed**: an `activity://feed` MCP resource with real subscription support (pushes updates when new posts or members appear)

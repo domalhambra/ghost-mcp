@@ -45,6 +45,14 @@ test("server boots, registers new tools, and local tools work", async () => {
             "site_weekly_report",
             // images
             "images_upload",
+            // site change plans
+            "plans_create",
+            "plans_add_op",
+            "plans_diff",
+            "plans_apply",
+            "plans_rollback",
+            "plans_list",
+            "plans_discard",
             // pre-existing tools still present
             "posts_browse",
             "members_browse",
@@ -63,6 +71,8 @@ test("server boots, registers new tools, and local tools work", async () => {
         assert.match(proposals.content[0].text, /No pending proposals/);
         const snapshots = await client.callTool({ name: "posts_list_snapshots", arguments: {} });
         assert.match(snapshots.content[0].text, /No snapshots/);
+        const plans = await client.callTool({ name: "plans_list", arguments: {} });
+        assert.match(plans.content[0].text, /No plans yet/);
     } finally {
         await client.close();
     }
